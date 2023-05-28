@@ -1,6 +1,7 @@
 import http from "http";
+import { Server } from "socket.io";
 import express from "express";
-import WebSocket from "ws";
+import { instrument } from "@socket.io/admin-ui";
 
 const app = express();
 
@@ -13,35 +14,74 @@ app.get("/*", (req, res) => res.redirect("/"));
 
 // 같은 서버에서 Http, Ws 둘 다 작동시키기
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server }); // http 서버위에 webSocket 서버 추가
+const io = new Server(server, {
+  cors: {
+    origin: ["https://admin.socket.io"],
+    credentials: true,
+  },
+});
+
+instrument(io, {
+  auth: false,
+  mode: "development",
+});
+
 server.listen(3000, () => console.log(`Listening on http://localhost:3000`));
 
-// socket 정보 담아두기 위한 배열 (socket : 연결된 각 브라우저)
-const socketList = [];
+const countPublicRooms = () => {
+  const {
+    sockets: {
+      adapter: { sids, rooms },
+    },
+  } = io;
+  const publicRooms = [];
 
-wss.on("connection", (socket) => {
-  socketList.push(socket);
-  socket.nickname = "Anonymous"; // socket은 객체라 property 추가 가능
-
-  console.log("Connected to Browser");
-
-  // 브라우저로부터 메세지 받기
-  socket.on("message", (_msg) => {
-    const msg = JSON.parse(_msg);
-    console.log("message from brwoser", msg);
-
-    switch (msg.type) {
-      case "new_msg":
-        socketList.forEach((s) => s.send(`${socket.nickname}: ${msg.text}`));
-        break;
-      case "nickname":
-        socket["nickname"] = msg.text;
-        break;
+  rooms.forEach((_, key) => {
+    if (sids.get(key) === undefined) {
+      publicRooms.push(key);
     }
   });
 
-  // 브라우저로부터 연결 끊겼을 때
-  socket.on("close", () => {
-    console.log("Disconnected from the Browser 😅");
+  return publicRooms;
+};
+
+const countRoom = (roomName) => {
+  return io.sockets.adapter.rooms.get(roomName)?.size; // rooms는 set 자료구조
+};
+
+io.on("connection", (socket) => {
+  socket["nickname"] = "anonymous";
+  console.log("connected");
+
+  socket.onAny((e) => {
+    console.log("socket server middleware");
+  });
+
+  // room 입장 이벤트
+  socket.on("room", (roomName, cb) => {
+    socket.join(roomName); // 룸 생성(참여)
+    cb();
+    socket.to(roomName).emit("welcome", socket.nickname, countRoom(roomName)); // 해당 룸에 welcome 이벤트 emit. 나는 제외
+    io.sockets.emit("room_change", countPublicRooms()); // 모든 소켓에 메세지 보내기\
+  });
+
+  // 퇴장에 이벤트
+  socket.on("disconnecting", () => {
+    socket.rooms.forEach((room) => {
+      socket.to(room).emit("bye", socket.nickname, countRoom(room) - 1); // 아직 방을 떠나지 않아 -1
+    });
+  });
+
+  socket.on("disconnect", () => {
+    io.sockets.emit("room_change", countPublicRooms()); // 모든 소켓에 메세지 보내기
+  });
+
+  socket.on("send_message", (roomName, msg) => {
+    socket.to(roomName).emit("send_message", `${socket.nickname}: ${msg}`);
+  });
+
+  // nickname
+  socket.on("nickname", (nickname) => {
+    socket["nickname"] = nickname;
   });
 });
